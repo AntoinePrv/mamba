@@ -65,7 +65,7 @@ namespace mamba::utils
 
     }
 
-    constexpr std::size_t combine_hash(std::size_t seed, std::size_t value)
+    std::size_t combine_hash(std::size_t seed, std::size_t value)
     {
         return combine_hash_impl(seed, value);
     }
