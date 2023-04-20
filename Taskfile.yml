@@ -1,0 +1,133 @@
+version: '3'
+
+vars:
+  build_dir: build
+  cmake_build_dir: '{{.PWD}}/{{.build_dir}}/cmake'
+  dev_env_dir: '{{.build_dir}}/envs/mamba-dev'
+  run_dev: micromamba run --prefix "{{.dev_env_dir}}"
+  test_env_dir: '{{.build_dir}}/envs/mamba-test'
+  run_test: micromamba run --prefix "{{.test_env_dir}}"
+  build_cpu:
+    sh: echo $(($(cat /proc/cpuinfo | grep processor | wc -l) * 75 / 100))  # 75% of CPUs
+
+tasks:
+
+  create-base-env:
+    cmds:
+      - micromamba create --yes --prefix "{{.prefix}}" python=3.10
+      - micromamba install --yes --prefix "{{.prefix}}" --file ./libmamba/environment-dev.yml
+      - micromamba install --yes --prefix "{{.prefix}}" --file ./mamba/environment-dev.yml
+      - micromamba install --yes --prefix "{{.prefix}}" --file ./libmambapy/environment-dev.yml
+      - micromamba install --yes --prefix "{{.prefix}}" --file ./micromamba/environment-dev.yml
+    sources:
+      - ./libmamba/environment-dev.yml
+      - ./libmambapy/environment-dev.yml
+      - ./mamba/environment-dev.yml
+      - ./micromamba/environment-dev.yml
+    status:
+      - micromamba list --prefix "{{.prefix}}" | grep cmake
+
+  create-dev-env:
+    cmds:
+      - task: create-base-env
+        vars: {prefix: '{{.dev_env_dir}}'}
+      - >-
+        micromamba install --yes --prefix "{{.dev_env_dir}}" --channel conda-forge
+        black pre-commit ccache sccache clang-tools clang clangxx lld python-lsp-server-base
+    status:
+      - micromamba list --prefix "{{.dev_env_dir}}" | grep ccache
+
+  create-test-env:
+    cmds:
+      - task: create-base-env
+        vars: {prefix: '{{.test_env_dir}}'}
+
+  # Dev launch points to run commands in the environment
+  run-test: '{{.run_test}} {{.CLI_ARGS}}'
+
+  micromamba:
+    deps: [{task: build, vars: {CLI_ARGS: '--parallel {{.build_cpu}} --target micromamba'}}]
+    cmds:
+      - '"{{.cmake_build_dir}}/micromamba/micromamba" {{.CLI_ARGS}}'
+
+  _configure:
+    cmds:
+      - cmake -B "{{.cmake_build_dir}}" --preset mamba-dev-clang-shared {{.ARGS}}
+      - ln --symbolic --force "{{.cmake_build_dir}}/compile_commands.json"
+    sources:
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - '**/*.cmake.in'
+    status:
+      - test -d "{{.cmake_build_dir}}/CMakeCache.txt"
+  configure:
+    cmds: [{task: _configure, vars: {ARGS: '{{.CLI_ARGS}}'}}]
+  reconfigure:
+    cmds:
+      - rm -rf "{{.cmake_build_dir}}/CMakeCache.txt"
+      - {task: _configure, vars: {ARGS: '{{.CLI_ARGS}}'}}
+
+  _build:
+    cmds:
+      - cmake --build "{{.cmake_build_dir}}" {{.ARGS}}
+  build:
+    cmds: [{task: _build, vars: {ARGS: '{{.CLI_ARGS}}'}}]
+
+  _test-libmamba:
+    deps: [{task: build, vars: {CLI_ARGS: '--parallel {{.build_cpu}} --target test_libmamba'}}]
+    dir: '{{.cmake_build_dir}}/libmamba/tests/'
+    cmds:
+      - ./test_libmamba {{.ARGS}}
+  test-libmamba:
+    cmds: [{task: _test-libmamba, vars: {ARGS: '{{.CLI_ARGS}}'}}]
+
+  install-all-cpp:
+    deps: [{task: _build, vars: {ARGS: '--parallel {{.build_cpu}}'}}]
+    cmds:
+      - 'cmake --install "{{.cmake_build_dir}}" --prefix "{{.test_env_dir}}"'
+
+  install-all-py:
+    deps: [install-all-cpp]
+    cmds:
+      - >-
+        {{.run_test}} python -m pip install
+        --no-deps --no-build-isolation --ignore-installed
+        --editable libmambapy/ mamba/
+
+  stubgen:
+    deps: [install-all-py]
+    cmds:
+      - "{{.run_test}} pybind11-stubgen -o '{{.cmake_build_dir}}' libmambapy.bindings"
+      - cp "{{.cmake_build_dir}}/libmambapy/bindings-stubs/__init__.pyi" libmambapy/libmambapy
+      - black libmambapy/libmambapy/__init__.pyi
+
+  test-reposerver:
+    deps: [install-all-py]
+    vars:
+      GNUPGHOME: { sh: 'mktemp -d' }
+    cmds:
+      - defer: rm -rf "{{.GNUPGHOME}}"
+      - GNUPGHOME={{.GNUPGHOME}} ./mamba/tests/generate_gpg_keys.sh
+      - GNUPGHOME={{.GNUPGHOME}} ./mamba/tests/testserver.sh
+
+  _test-mamba:
+    deps: [install-all-py]
+    cmds:
+      - "{{.run_test}} python -m pytest mamba/tests/ {{.ARGS}}"
+  test-mamba:
+    cmds: [{task: _test-mamba, vars: {ARGS: '{{.CLI_ARGS}}'}}]
+
+  _test-micromamba:
+    deps: [_build]
+    env:
+      TEST_MAMBA_EXE: '{{.cmake_build_dir}}/micromamba/micromamba'
+    cmds:
+      # --exitfirst --failed-first --last-failed
+      - python -m pytest micromamba/tests/ --mamba-pkgs-dir="${CONDA_PKGS_DIRS}" {{.ARGS}}
+  test-micromamba:
+    cmds: [{task: _test-micromamba, vars: {ARGS: "{{.CLI_ARGS}}"}}]
+
+  pre-commit:
+    deps: [create-dev-env]
+    cmds:
+      - pre-commit run --all-files {{.CLI_ARGS}}
