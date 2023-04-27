@@ -103,6 +103,8 @@ namespace mamba::specs
 
         static auto parse(std::string_view str) -> Version;
 
+        /** Construct version ``0.0``. */
+        Version() noexcept = default;
         Version(std::size_t epoch, CommonVersion&& version, CommonVersion&& local = {}) noexcept;
 
         auto epoch() const noexcept -> std::size_t;
