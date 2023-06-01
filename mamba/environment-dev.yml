@@ -22,6 +22,9 @@ dependencies:
   - pybind11
   - pyyaml
   - conda
+  - conda-content-trust
+  - pip:
+    - securesystemslib
   - sel(win): winreg
   # Test dependencies
   - pytest

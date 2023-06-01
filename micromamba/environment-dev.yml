@@ -27,5 +27,6 @@ dependencies:
   - pyyaml
   - spdlog
   - fmt
+  - pre-commit
   - sel(win): winreg
   - sel(win): pywin32
